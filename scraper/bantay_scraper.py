@@ -1,17 +1,5 @@
 """
 Bantay Presyo Scraper
-=====================
-Scrapes real-time commodity price data from the Philippine Department of
-Agriculture's Bantay Presyo website (http://www.bantaypresyo.da.gov.ph/).
-
-Usage:
-    python bantay_scraper.py                    # Scrape all categories
-    python bantay_scraper.py --category meat    # Scrape one category
-    python bantay_scraper.py --region 3         # Scrape one region
-    python bantay_scraper.py --dry-run          # Test without saving
-
-Requirements:
-    pip install requests beautifulsoup4 pandas
 """
 
 import requests
@@ -20,28 +8,22 @@ import time
 import logging
 import argparse
 import sys
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
-
-# ─── Logging ──────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/scraper.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-
 BASE_URL = "http://www.bantaypresyo.da.gov.ph"
 
-# Map of category slug → URL path
 CATEGORIES = {
     "rice":       "/tbl_rice.php",
     "meat":       "/tbl_meat.php",
@@ -50,7 +32,6 @@ CATEGORIES = {
     "fruits":     "/tbl_fruit.php",
 }
 
-# DA Bantay Presyo region IDs (as used in their query params)
 REGIONS = {
     1:  "CAR (Cordillera Administrative Region)",
     2:  "Region I (Ilocos Region)",
@@ -82,15 +63,12 @@ HEADERS = {
     "Referer": BASE_URL,
 }
 
-# ─── Session ──────────────────────────────────────────────────────────────────
 
 def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(HEADERS)
     return s
 
-
-# ─── Page Fetching ────────────────────────────────────────────────────────────
 
 def fetch_page(
     session: requests.Session,
@@ -99,7 +77,6 @@ def fetch_page(
     retries: int = 3,
     delay: float = 2.0,
 ) -> Optional[str]:
-    """Fetch a page with retries and polite delay."""
     for attempt in range(1, retries + 1):
         try:
             resp = session.get(url, params=params, timeout=30)
@@ -114,21 +91,10 @@ def fetch_page(
     return None
 
 
-# ─── Parsing ──────────────────────────────────────────────────────────────────
-
 def parse_market_table(html: str, region_name: str, category: str) -> dict:
-    """
-    Parse the market price HTML table from Bantay Presyo.
-
-    Returns a dict with:
-        date: str
-        markets: list[str]
-        commodities: list[{commodity, specification, prices: list[str]}]
-    """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find the date (usually in a <span> or <td> near the top)
-    report_date = datetime.now().strftime("%Y-%m-%d")  # fallback
+    report_date = datetime.now().strftime("%Y-%m-%d")
     date_candidates = soup.find_all(string=lambda t: t and "as of" in t.lower())
     for dc in date_candidates:
         try:
@@ -139,7 +105,6 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
         except ValueError:
             continue
 
-    # Find the main data table
     tables = soup.find_all("table")
     data_table = None
     for tbl in tables:
@@ -149,7 +114,6 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
             break
 
     if data_table is None:
-        # Try finding any table with enough columns
         for tbl in tables:
             rows = tbl.find_all("tr")
             if len(rows) > 3:
@@ -166,16 +130,13 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
     if not rows:
         return {"date": report_date, "markets": [], "commodities": []}
 
-    # ── Header row: extract market names ─────────────────────────────────────
     header_cells = rows[0].find_all(["th", "td"])
-    # First cell = "Commodity", second = "Spec/Type", rest = market names
     markets = []
     for cell in header_cells[2:]:
         txt = cell.get_text(separator=" ", strip=True)
         if txt and txt.upper() not in ("RANGE", "MIN", "MAX", "AVG"):
             markets.append(txt.upper())
 
-    # ── Data rows ─────────────────────────────────────────────────────────────
     commodities = []
     for row in rows[1:]:
         cells = row.find_all(["td", "th"])
@@ -185,14 +146,12 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
         commodity = cells[0].get_text(strip=True)
         specification = cells[1].get_text(strip=True) if len(cells) > 1 else ""
 
-        # Skip header-like rows
         if not commodity or commodity.upper() in ("COMMODITY", "ITEM"):
             continue
 
         prices = []
         for cell in cells[2: 2 + len(markets)]:
             raw = cell.get_text(strip=True)
-            # Normalise: strip commas, currency signs, whitespace
             clean = raw.replace(",", "").replace("₱", "").replace("PHP", "").strip()
             if clean in ("", "-", "N/A", "n/a", "na", "NA", "*"):
                 prices.append("N/A")
@@ -202,7 +161,6 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
                 except ValueError:
                     prices.append("N/A")
 
-        # Pad prices if some markets had no data column
         while len(prices) < len(markets):
             prices.append("N/A")
 
@@ -219,33 +177,14 @@ def parse_market_table(html: str, region_name: str, category: str) -> dict:
     }
 
 
-def parse_ajax_prices(html: str) -> list[dict]:
-    """
-    Some Bantay Presyo pages load price data via AJAX as JSON.
-    Try to detect and parse those responses.
-    """
-    try:
-        data = json.loads(html)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-    except json.JSONDecodeError:
-        pass
-    return []
-
-
-# ─── Scraping Orchestration ───────────────────────────────────────────────────
-
 def scrape_category_region(
     session: requests.Session,
     category_slug: str,
     region_id: int,
     region_name: str,
 ) -> Optional[dict]:
-    """Scrape one category × region combination."""
     url = BASE_URL + CATEGORIES[category_slug]
-    params = {"rid": region_id}  # Bantay Presyo uses ?rid=X for region filter
+    params = {"rid": region_id}
 
     log.info(f"  Fetching {category_slug.upper()} / {region_name}...")
     html = fetch_page(session, url, params=params)
@@ -262,11 +201,6 @@ def scrape_all(
     categories_to_scrape: Optional[list] = None,
     regions_to_scrape: Optional[list] = None,
 ) -> dict:
-    """
-    Scrape all (or selected) category × region combinations.
-
-    Returns the full market_comparison_data structure ready for the dashboard.
-    """
     session = make_session()
 
     cats = categories_to_scrape or list(CATEGORIES.keys())
@@ -302,7 +236,6 @@ def scrape_all(
             else:
                 log.warning(f"    ✗ No data returned")
 
-            # Polite delay between requests
             time.sleep(1.5)
 
     result["scrape_metadata"] = {
@@ -317,8 +250,6 @@ def scrape_all(
 
     return result
 
-
-# ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Bantay Presyo Scraper")
@@ -335,7 +266,7 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default="output/market_comparison_data.json",
+        default="scraper/output/market_comparison_data.json",
         help="Output JSON file path",
     )
     parser.add_argument(
@@ -357,14 +288,12 @@ def main():
                 print(f"  Region {rid} ({rname}) / {cslug}")
         return
 
-    Path("logs").mkdir(exist_ok=True)
-    Path("output").mkdir(exist_ok=True)
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     log.info("=== Bantay Presyo Scraper Starting ===")
     data = scrape_all(cats, regs)
 
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
