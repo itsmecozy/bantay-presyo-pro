@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Store, MapPin, Search, TrendingUp, TrendingDown,
+  Store, MapPin, Search, 
   ChevronDown, Info, RefreshCw
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
